@@ -3,3 +3,9 @@
 name = "expr"
 version = "0.0.1"
 authors = ["int14lpu"]
+
+description = "A simple expression parser."
+repository = "https://github.com/LUKK3/rust-expr"
+readme = "README.md"
+
+license = "WTFPL"

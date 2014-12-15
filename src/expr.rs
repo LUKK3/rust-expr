@@ -1,6 +1,7 @@
 
 use std::num::{Int, Float};
 use std::collections::HashMap;
+use std::fmt::Show;
 use regex::Regex;
 
 #[deriving(Clone, Show, PartialEq, PartialOrd)]
@@ -65,6 +66,7 @@ enum Token<T> {
 pub enum Error {
 	MismatchedParenthesis,
 	MisplacedComma,
+	InvalidOperation,
 	UnknownToken(String),
 } // TODO: impl Error
 
@@ -81,7 +83,7 @@ pub fn parse(expression: &str) -> Result<Expr<()>, Error> {
 	let parser: ExprParser<()> = ExprParser::new();
 	parser.parse(expression)
 }
-impl<T: Clone> ExprParser<T> {
+impl<T: Clone + Show> ExprParser<T> {
 	pub fn new() -> ExprParser<T> {
 		ExprParser { functions: Vec::new(), function_name_map: HashMap::new() }
 	}
@@ -127,9 +129,11 @@ impl<T: Clone> ExprParser<T> {
 			}
 		}
 
-		// TODO: optimization
-
-		Ok(expr)
+		// Optimize and return
+		match expr.optimize() {
+			Some(err) => Err(err),
+			None      => Ok(expr),
+		}
 	}
 	fn parse_token(&self, expr: &mut Expr<T>,
 		           op_stack: &mut Vec<Op>,
@@ -287,9 +291,19 @@ pub struct Expr<T> {
 	variables: Vec<Option<Val<T>>>,
 	variable_name_map: HashMap<String, uint>,
 }
-impl<T: Clone> Expr<T> {
+impl<T: Clone + Show> Expr<T> {
 
-	// Sets the value of the given variable to an integer.
+	/// Returns the number of tokens in this expression.
+	pub fn len(&self) -> uint {
+		self.rpn_stack.len()
+	}
+
+	/// Returns the number of distinct variables in this expression.
+	pub fn num_variables(&self) -> uint {
+		self.variables.len()
+	}
+
+	/// Sets the value of the given variable to an integer.
 	pub fn set_variable_int(&mut self, name: &str, val: i32) {
 		match self.variable_name_map.get(name) {
 			Some(i) => self.variables[*i] = Some(Val::Int(val)),
@@ -297,7 +311,7 @@ impl<T: Clone> Expr<T> {
 		}
 	}
 
-	// Sets the value of the given variable to a floating point value.
+	/// Sets the value of the given variable to a floating point value.
 	pub fn set_variable_float(&mut self, name: &str, val: f64) {
 		match self.variable_name_map.get(name) {
 			Some(i) => self.variables[*i] = Some(Val::Float(val)),
@@ -305,7 +319,7 @@ impl<T: Clone> Expr<T> {
 		}
 	}
 
-	// Sets the value of the given variable to a string.
+	/// Sets the value of the given variable to a string.
 	pub fn set_variable_str(&mut self, name: &str, val: String) {
 		match self.variable_name_map.get(name) {
 			Some(i) => self.variables[*i] = Some(Val::Str(val)),
@@ -313,22 +327,30 @@ impl<T: Clone> Expr<T> {
 		}
 	}
 
-	// Sets all the variables in this expression.
+	/// Sets all the variables in this expression.
 	pub fn set_variables(&mut self, f: |&str| -> Val<T>) {
 		for (name, idx) in self.variable_name_map.iter() {
 			self.variables[*idx] = Some(f(name[]));
 		}
 	}
 
-	// Evaluates the expression.
-	// Will return None if any variables are undefined or any operations are invalid.
-	// If it returns a valid value once, it should continue to do so
-	// unless you change the type of any of the variables.
+	/// Evaluates the expression.
+	/// Will return None if any variables are undefined or any operations are invalid.
+	/// If it returns a valid value once, it should continue to do so
+	/// unless you change the type of any of the variables.
 	pub fn evaluate(&self) -> Option<Val<T>> {
 		let mut eval_stack: Vec<Val<T>> = Vec::new();
 		for token in self.rpn_stack.iter() {
 			match *token {
-				Token::Op(ref op)   => if !Expr::operate(&mut eval_stack, op.clone()) { return None; }, // TODO: what
+				Token::Op(ref op) => {
+					if eval_stack.len() < 2 { return None; }
+					let b = eval_stack.pop().unwrap();
+					let a = eval_stack.pop().unwrap();
+					match Expr::operate_binary(a, b, op.clone()) {
+						None      => return None,
+						Some(val) => eval_stack.push(val),
+					}
+				},
 				Token::Val(ref val) => eval_stack.push(val.clone()),
 				Token::Var(i)  => match self.variables[i] {
 					None          => return None,
@@ -338,35 +360,67 @@ impl<T: Clone> Expr<T> {
 		}
 		eval_stack.pop()
 	}
-	fn operate(eval_stack: &mut Vec<Val<T>>, op: Op) -> bool {
-		if eval_stack.len() < 2 { return false; }
 
-		let b = eval_stack.pop().unwrap();
-		let a = eval_stack.pop().unwrap();
+	fn optimize(&mut self) -> Option<Error> {
+		let mut eval_stack: Vec<Token<T>> = Vec::new();
+		println!("Full: {}", self.rpn_stack);
+		'tokens: for token in self.rpn_stack.iter() {
+			println!("Kay: {}", eval_stack);
+			match *token {
+				Token::Op(ref op) => {
+					let num_args = 2;
 
-		let res = match a {
+					if eval_stack.len() < num_args { return Some(Error::InvalidOperation); }
+					for i in range(0, num_args) {
+						match eval_stack[eval_stack.len() - (i + 1)] {
+							Token::Val(_) => (),
+							_ => {
+								eval_stack.push(token.clone());
+								continue 'tokens;
+							},
+						}
+					}
+					let mut vals = Vec::new();
+					for _ in range(0, num_args) {
+						vals.push(match eval_stack.pop().unwrap() {
+							Token::Val(val) => val,
+							_ => panic!("what"),
+						});
+					}
+
+					let a = vals.pop().unwrap();
+					let b = vals.pop().unwrap();
+					match Expr::operate_binary(a, b, op.clone()) {
+						None      => return Some(Error::InvalidOperation),
+						Some(val) => eval_stack.push(Token::Val(val)),
+					}
+				},
+				_ => eval_stack.push(token.clone()),
+			}
+		}
+		self.rpn_stack = eval_stack;
+		None
+	}
+
+	fn operate_binary(a: Val<T>, b: Val<T>, op: Op) -> Option<Val<T>> {
+		match a {
 			Val::Int(a_val)   => match b {
 				  Val::Int(b_val) => Expr::operate_int(a_val,        b_val, op),
 				Val::Float(b_val) => Expr::operate_flt(a_val as f64, b_val, op),
-				_ => return false,
+				_ => return None,
 			},
 			Val::Float(a_val) => match b {
 				  Val::Int(b_val) => Expr::operate_flt(a_val, b_val as f64, op),
 				Val::Float(b_val) => Expr::operate_flt(a_val, b_val,        op),
-				_ => return false,
+				_ => return None,
 			},
 			Val::Str(a_val) => match b {
 				Val::Str(b_val) => Expr::operate_str(a_val, b_val, op),
-				_ => return false,
+				_ => return None,
 			},
-			_ => return false,
-		};
-
-		match res {
-			None      => return false,
-			Some(val) => eval_stack.push(val),
+			_ => return None,
 		}
-		true
+		// TODO: unary
 	}
 	fn operate_int(a: i32, b: i32, op: Op) -> Option<Val<T>> {
 		match op {
@@ -441,7 +495,7 @@ mod test {
 		let mut res;
 
 		res = super::parse("3 && 2.5");
-		assert_eq!(res.unwrap().evaluate(), None);
+		assert_eq!(res.err().unwrap(), super::Error::InvalidOperation);
 
 		res = super::parse("2d4 + 6");
 		assert_eq!(res.err().unwrap(), super::Error::UnknownToken("2d4".to_string()));
@@ -453,10 +507,10 @@ mod test {
 		assert_eq!(res.err().unwrap(), super::Error::MismatchedParenthesis);
 
 		res = super::parse("6 + ");
-		assert_eq!(res.unwrap().evaluate(), None);
+		assert_eq!(res.err().unwrap(), super::Error::InvalidOperation);
 
 		res = super::parse("* * *");
-		assert_eq!(res.unwrap().evaluate(), None);
+		assert_eq!(res.err().unwrap(), super::Error::InvalidOperation);
 
 		res = super::parse("3 ~= 2");
 		assert_eq!(res.err().unwrap(), super::Error::UnknownToken("~".to_string()));
@@ -467,7 +521,8 @@ mod test {
 		let form = super::parse(r#" "eat" + " " + "hotdogs" "#).unwrap();
 		assert_eq!(form.evaluate(), Some(Val::Str("eat hotdogs".to_string())));
 
-		assert_eq!(super::parse(r#" "eat" * 6 "#).unwrap().evaluate(), None);
+		let res = super::parse(r#" "eat" * 6 "#);
+		assert_eq!(res.err().unwrap(), super::Error::InvalidOperation);
 
 		assert!(super::parse(r#" """ "#).is_err());
 	}
@@ -505,6 +560,23 @@ mod test {
 		let mut form2 = super::parse(r#" once + upon + a + time "#).unwrap();
 		form2.set_variables(|name: &str| { Val::Str(format!("{} ", name)) });
 		assert_eq!(form2.evaluate(), Some(Val::Str("once upon a time ".to_string())));
+
+		let mut form3 = super::parse("x + x * x - x / y").unwrap();
+		assert_eq!(form3.num_variables(), 2);
+		form3.set_variable_int("x", 6);
+		form3.set_variable_int("y", 3);
+		assert_eq!(form3.evaluate(), Some(Val::Int(40)));
+	}
+
+	#[test]
+	fn test_optimization() {
+		let mut form;
+		
+		form = super::parse("3 * 3 * 3 + 12").unwrap();
+		assert_eq!(form.len(), 1);
+
+		form = super::parse("3 + x ^ (2 + 2)").unwrap();
+		assert_eq!(form.len(), 5);
 	}
 
 	/*#[test]
